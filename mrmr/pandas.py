@@ -6,7 +6,7 @@ import pandas as pd
 import category_encoders as ce
 from sklearn.feature_selection import f_classif as sklearn_f_classif
 from sklearn.feature_selection import f_regression as sklearn_f_regression
-from scipy.stats import ks_2samp
+from scipy.stats import ks_2samp, entropy
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from .main import mrmr_base
 
@@ -92,6 +92,58 @@ def encode_df(X, y, cat_features, cat_encoding):
     return X
 
 
+def kl_divergence(p, q):
+    epsilon = 1e-10
+    p = p + epsilon
+    q = q + epsilon
+    return entropy(p, q)
+
+def _kl_classif(X, y):
+    def _kl_series(x, y):
+        x_not_na = ~x.isna()
+        if x_not_na.sum() == 0:
+            return 0
+        x = x[x_not_na]
+        y = y[x_not_na]
+        def calc_kl(s):
+            class_vals = x[y == s.name]
+            other_vals = x[y != s.name]
+            p_hist, _ = np.histogram(class_vals, bins=100, density=True)
+            q_hist, _ = np.histogram(other_vals, bins=100, density=True)
+            return kl_divergence(p_hist, q_hist)
+        return x.groupby(y).apply(calc_kl).mean()
+    return X.apply(lambda col: _kl_series(col, y)).fillna(0.0)
+
+def kl_classif(X, y, n_jobs):
+    return parallel_df(_kl_classif, X, y, n_jobs=n_jobs)
+
+def js_divergence(p, q):
+    epsilon = 1e-10
+    p = p + epsilon
+    q = q + epsilon
+    m = 0.5 * (p + q)
+    return 0.5 * entropy(p, m) + 0.5 * entropy(q, m)
+
+def _js_classif(X, y):
+    def _js_series(x, y):
+        x_not_na = ~x.isna()
+        if x_not_na.sum() == 0:
+            return 0
+        x = x[x_not_na]
+        y = y[x_not_na]
+        def calc_js(s):
+            class_vals = x[y == s.name]
+            other_vals = x[y != s.name]
+            p_hist, _ = np.histogram(class_vals, bins=100, density=True)
+            q_hist, _ = np.histogram(other_vals, bins=100, density=True)
+            return js_divergence(p_hist, q_hist)
+        return x.groupby(y).apply(calc_js).mean()
+    return X.apply(lambda col: _js_series(col, y)).fillna(0.0)
+
+def js_classif(X, y, n_jobs):
+    return parallel_df(_js_classif, X, y, n_jobs=n_jobs)
+
+
 def mrmr_classif(
         X, y, K,
         relevance='f', redundancy='c', denominator='mean',
@@ -158,10 +210,22 @@ def mrmr_classif(
         relevance_func = functools.partial(ks_classif, n_jobs=n_jobs)
     elif relevance == "rf":
         relevance_func = random_forest_classif
+    elif relevance == "kl":
+        relevance_func = functools.partial(kl_classif, n_jobs=n_jobs)
+    elif relevance == "js":
+        relevance_func = functools.partial(js_classif, n_jobs=n_jobs)
     else:
         relevance_func = relevance
 
-    redundancy_func = functools.partial(correlation, n_jobs=n_jobs) if redundancy == 'c' else redundancy
+    if redundancy == "c":
+        redundancy_func = functools.partial(correlation, n_jobs=n_jobs)
+    elif redundancy == "kl":
+        redundancy_func = functools.partial(kl_classif, n_jobs=n_jobs)
+    elif redundancy == "js":
+        redundancy_func = functools.partial(js_classif, n_jobs=n_jobs)
+    else:
+        redundancy_func = redundancy
+
     denominator_func = np.mean if denominator == 'mean' else (
         np.max if denominator == 'max' else denominator)
 
